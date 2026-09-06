@@ -3,15 +3,92 @@ import os
 import json
 import time
 import copy
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Dataset
 from torchvision import datasets, transforms, models
+from PIL import Image
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+
+class RobustImageFolder(datasets.ImageFolder):
+    """
+    ImageFolder that skips corrupt/unreadable/wrong-format files instead of crashing.
+    
+    - Skips files that PIL cannot open
+    - Skips files that fail during transform (e.g. truncated images)
+    - Skips non-image files silently  
+    - Logs skipped files for debugging
+    - Reports total skipped count
+    """
+    
+    SUPPORTED_EXTENSIONS = {
+        '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'
+    }
+    
+    def __init__(self, root, transform=None, **kwargs):
+        self.skipped_files = []
+        self._pre_filter_root = root
+        super().__init__(root, transform=transform, **kwargs)
+        # Post-filter: remove entries that cannot be opened
+        self._filter_bad_samples()
+    
+    def _filter_bad_samples(self):
+        """Remove samples with unsupported extensions or that cannot be opened."""
+        valid_samples = []
+        for path, class_idx in self.samples:
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in self.SUPPORTED_EXTENSIONS:
+                self.skipped_files.append((path, f'unsupported extension: {ext}'))
+                continue
+            try:
+                with Image.open(path) as img:
+                    img.verify()  # quick integrity check
+                valid_samples.append((path, class_idx))
+            except Exception as e:
+                self.skipped_files.append((path, str(e)))
+        
+        if self.skipped_files:
+            logger.warning(
+                f"RobustImageFolder: skipped {len(self.skipped_files)} bad files "
+                f"out of {len(self.samples)} total in {self._pre_filter_root}"
+            )
+            for path, reason in self.skipped_files[:10]:
+                logger.warning(f"  Skipped: {os.path.basename(path)} - {reason}")
+            if len(self.skipped_files) > 10:
+                logger.warning(f"  ... and {len(self.skipped_files) - 10} more")
+        
+        self.samples = valid_samples
+        self.imgs = valid_samples  # ImageFolder alias
+        self.targets = [s[1] for s in valid_samples]
+    
+    def __getitem__(self, index):
+        """Load item with fallback: if transform fails, try next valid sample."""
+        max_retries = min(5, len(self.samples))
+        for attempt in range(max_retries):
+            try:
+                path, target = self.samples[(index + attempt) % len(self.samples)]
+                sample = self.loader(path)
+                if sample.mode != 'RGB':
+                    sample = sample.convert('RGB')
+                if self.transform is not None:
+                    sample = self.transform(sample)
+                if self.target_transform is not None:
+                    target = self.target_transform(target)
+                return sample, target
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"Error loading {path}: {e}, trying next")
+                continue
+        # Should not reach here, but fallback to parent
+        return super().__getitem__(index)
 
 
 def get_backbone(name: str, num_classes: int, pretrained: bool = True) -> nn.Module:
@@ -127,8 +204,12 @@ def train_attribute_model(
     # Get transforms
     tx = get_transforms(target_size, augment=True, aug_config=augmentation or {})
     
-    # Load dataset
-    full_dataset = datasets.ImageFolder(dataset_dir, transform=tx['train'])
+    # Load dataset with RobustImageFolder (skips corrupt/bad files)
+    full_dataset = RobustImageFolder(dataset_dir, transform=tx['train'])
+    skipped_count = len(full_dataset.skipped_files)
+    if skipped_count > 0:
+        print(f"Skipped {skipped_count} bad/unreadable files during loading")
+    
     class_names = full_dataset.classes
     num_classes = len(class_names)
     
@@ -138,6 +219,31 @@ def train_attribute_model(
             'error': f"Need at least 2 classes, found {num_classes}: {class_names}",
             'attribute': attribute_name
         }
+    
+    if len(full_dataset) < 2:
+        return {
+            'success': False,
+            'error': f"Not enough valid images: {len(full_dataset)} (skipped {skipped_count})",
+            'attribute': attribute_name
+        }
+    
+    # --- Adaptive mode: auto-tune params if batch_size/epochs not explicitly set ---
+    adaptive_config = dm.adaptive_training_config(
+        backbone=backbone,
+        num_classes=num_classes,
+        dataset_size=len(full_dataset),
+        base_image_size=target_size[0]
+    )
+    # Use adaptive values as smart defaults (explicit params override)
+    if batch_size == 32:  # default => use adaptive
+        batch_size = adaptive_config.get('batch_size', batch_size)
+    if learning_rate == 0.001:  # default => use adaptive
+        learning_rate = adaptive_config.get('learning_rate', learning_rate)
+    
+    print(f"Training config: batch_size={batch_size}, lr={learning_rate}, "
+          f"img={target_size}, workers={num_workers}")
+    print(f"Resource limit: {dm.max_resource_percent:.0f}% | "
+          f"Estimated usage: {adaptive_config.get('resource_report', {}).get('estimated_usage_percent', '?')}%")
     
     # Split into train/val
     total = len(full_dataset)
@@ -149,8 +255,8 @@ def train_attribute_model(
         generator=torch.Generator().manual_seed(42)
     )
     
-    # Override val transform
-    val_dataset.dataset = datasets.ImageFolder(dataset_dir, transform=tx['val'])
+    # Override val transform with RobustImageFolder
+    val_dataset.dataset = RobustImageFolder(dataset_dir, transform=tx['val'])
     
     # Use DeviceManager for optimal DataLoader settings
     dl_kwargs = dm.get_dataloader_kwargs()

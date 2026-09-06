@@ -25,20 +25,43 @@ def load_yolo_annotations(txt_path: str) -> List[Dict[str, Any]]:
     Each line: class_id center_x center_y width height
     All values normalized to [0, 1]
     
+    Skips malformed lines (wrong format, non-numeric values, NaN/Inf).
     Returns list of dicts with keys: class_id, cx, cy, w, h
     """
     annotations = []
-    with open(txt_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) >= 5:
-                annotations.append({
-                    'class_id': int(parts[0]),
-                    'cx': float(parts[1]),
-                    'cy': float(parts[2]),
-                    'w': float(parts[3]),
-                    'h': float(parts[4])
-                })
+    skipped = 0
+    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'latin-1']:
+        try:
+            with open(txt_path, 'r', encoding=enc) as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 5:
+                        skipped += 1
+                        continue
+                    try:
+                        class_id = int(parts[0])
+                        cx = float(parts[1])
+                        cy = float(parts[2])
+                        w = float(parts[3])
+                        h = float(parts[4])
+                        # Skip NaN, Inf, or clearly invalid values
+                        import math
+                        if any(math.isnan(v) or math.isinf(v) for v in [cx, cy, w, h]):
+                            skipped += 1
+                            continue
+                        annotations.append({
+                            'class_id': class_id,
+                            'cx': cx, 'cy': cy, 'w': w, 'h': h
+                        })
+                    except (ValueError, TypeError):
+                        skipped += 1
+                        continue
+            break  # success
+        except UnicodeDecodeError:
+            continue
     return annotations
 
 

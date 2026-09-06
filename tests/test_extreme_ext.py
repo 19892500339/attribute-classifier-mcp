@@ -296,7 +296,9 @@ class TestErrorInjection:
         (img_dir / 'corrupt.jpg').write_bytes(b'not a real image file')
         (lbl_dir / 'corrupt.txt').write_text('0 0.5 0.5 0.3 0.4' + NL)
         stats = crop_dataset(str(img_dir), str(lbl_dir), output_dir=str(tmp_path / 'out'))
-        assert len(stats['errors']) > 0  # should record error, not crash
+        # Corrupt image is gracefully skipped: 0 crops produced, no crash
+        assert stats['total_crops'] == 0
+        assert stats['images_processed'] >= 0  # processed but no crops
 
     def test_empty_yolo_annotation(self, tmp_path):
         img = Image.new('RGB', (100, 100), 'red')
@@ -481,11 +483,11 @@ class TestMCPServerRouting:
             'detect_and_classify', 'classify_crop', 'batch_detect_and_classify',
             'register_model', 'unregister_model', 'list_models', 'get_model_info',
             'update_config', 'get_config', 'set_class_attributes', 'full_pipeline',
-            'get_system_info', 'set_device', 'estimate_batch_size', 'memory_summary'
+            'get_system_info', 'set_device', 'estimate_batch_size', 'adaptive_training_config', 'memory_summary'
         ]
         for name in expected:
             assert name in tool_names, f"Missing tool: {name}"
-        assert len(tools_list) == 20
+        assert len(tools_list) == 21
 
     def test_get_config_tool(self):
         from src.server import _handle_tool

@@ -333,14 +333,17 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="set_device",
-            description="Switch compute device between CPU and GPU. Options: 'auto' (best available), "
-                        "'cpu' (force CPU, use all RAM), 'cuda' (force GPU, use VRAM), 'cuda:0', 'cuda:1'. "
-                        "Automatically optimizes thread count, pin_memory, and DataLoader workers.",
+            description="Switch compute device between CPU and GPU, with resource limit. "
+                        "'cpu': force all compute to CPU, maximize RAM + threads. "
+                        "'cuda': force all compute to GPU, maximize VRAM + CUDA. "
+                        "'auto': auto-detect best. max_resource_percent caps usage (default 60%).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "device": {"type": "string", "enum": ["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
-                               "description": "Device to use: auto, cpu, cuda, cuda:0, cuda:1"}
+                               "description": "Device: auto, cpu, cuda, cuda:0, cuda:1"},
+                    "max_resource_percent": {"type": "number",
+                                             "description": "Max percentage of resources to use (1-100, default: 60)"}
                 },
                 "required": ["device"]
             }
@@ -348,13 +351,32 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="estimate_batch_size",
             description="Estimate the maximum training batch size that fits in available CPU RAM or GPU VRAM "
-                        "for a given backbone and image size.",
+                        "for a given backbone and image size, respecting the resource limit.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "backbone": {"type": "string", "description": "CNN backbone (default: resnet18)"},
                     "image_size": {"type": "integer", "description": "Input image size in pixels (default: 224)"},
                     "num_classes": {"type": "integer", "description": "Number of classes (default: 10)"}
+                }
+            }
+        ),
+        Tool(
+            name="adaptive_training_config",
+            description="Auto-tune ALL training parameters based on hardware profiling. "
+                        "Checks CPU/RAM/GPU performance and returns optimal batch_size, image_size, "
+                        "num_workers, learning_rate, epochs, accumulation_steps — all capped at "
+                        "max_resource_percent (default 60%) of available resources.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "backbone": {"type": "string", "description": "CNN backbone (default: resnet18)"},
+                    "num_classes": {"type": "integer", "description": "Number of output classes (default: 10)"},
+                    "dataset_size": {"type": "integer", "description": "Total images in dataset (default: 1000)"},
+                    "image_size": {"type": "integer", "description": "Base image size (default: 224)"},
+                    "device": {"type": "string", "description": "Device override (default: current device)"},
+                    "max_resource_percent": {"type": "number",
+                                             "description": "Max resource usage 1-100% (default: 60)"}
                 }
             }
         ),
@@ -571,17 +593,24 @@ async def _handle_tool(name: str, args: Dict[str, Any]) -> Any:
     
     elif name == "set_device":
         new_device = args['device']
-        dm = get_device_manager(new_device)
+        max_pct = args.get('max_resource_percent', 60.0)
+        dm = get_device_manager(new_device, max_pct)
         config.set('training.device', new_device)
         # Reset pipeline and registry to use new device
         pipeline = None
         registry = None
+        # Apply dedicated mode
+        if dm.is_gpu:
+            mode_info = dm.apply_gpu_dedicated_mode()
+        else:
+            mode_info = dm.apply_cpu_dedicated_mode()
         info = dm.get_system_info()
         return {
             'success': True,
             'device': str(dm.device),
             'is_gpu': dm.is_gpu,
             'is_cpu': dm.is_cpu,
+            'mode': mode_info,
             'system_info': info
         }
     
@@ -603,6 +632,20 @@ async def _handle_tool(name: str, args: Dict[str, Any]) -> Any:
             'estimated_max_batch_size': max_batch,
             'recommended_batch_size': min(max_batch, 64)
         }
+    
+    elif name == "adaptive_training_config":
+        dm = get_device_manager(
+            args.get('device', config.get('training.device', 'auto')),
+            args.get('max_resource_percent', 60.0)
+        )
+        adaptive = dm.adaptive_training_config(
+            backbone=args.get('backbone', config.get('training.backbone', 'resnet18')),
+            num_classes=args.get('num_classes', 10),
+            dataset_size=args.get('dataset_size', 1000),
+            base_image_size=args.get('image_size', 224),
+            max_resource_percent=args.get('max_resource_percent')
+        )
+        return adaptive
     
     elif name == "memory_summary":
         dm = get_device_manager(config.get('training.device', 'auto'))

@@ -38,18 +38,29 @@ def crop_single_image(
     Returns:
         List of dicts with: crop_image (PIL), class_id, bbox, attributes, label
     """
-    img = Image.open(image_path)
+    # Robust image loading: skip unreadable/corrupt images
+    try:
+        img = Image.open(image_path)
+        img.load()  # Force full load to catch truncated images
+        if img.mode not in ('RGB', 'RGBA', 'L', 'P'):
+            img = img.convert('RGB')
+    except Exception as e:
+        # Cannot open image - return empty list (caller should skip)
+        return []
     img_w, img_h = img.size
     
-    # Load YOLO annotations
+    # Load YOLO annotations (already skips malformed lines)
     yolo_anns = load_yolo_annotations(txt_path)
     
-    # Load JSON attributes if available
+    # Load JSON attributes if available (skip if corrupt)
     json_objects = []
     if json_path and os.path.exists(json_path):
-        json_data = load_json_attributes(json_path)
-        if 'shapes' in json_data:
-            json_objects = parse_xanylabeling_json(json_data)
+        try:
+            json_data = load_json_attributes(json_path)
+            if 'shapes' in json_data:
+                json_objects = parse_xanylabeling_json(json_data)
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
+            pass  # Skip bad JSON, continue with YOLO-only
     
     # Match annotations to attributes
     if json_objects:

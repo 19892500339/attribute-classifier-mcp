@@ -23,6 +23,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from src.utils.config import get_config
+from src.utils.device_manager import DeviceManager, get_device_manager
 from src.utils.data_loader import (
     load_classes,
     load_yolo_annotations,
@@ -320,6 +321,50 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["images_dir", "labels_dir"]
             }
+        ),
+        Tool(
+            name="get_system_info",
+            description="Get comprehensive system hardware info: CPU cores, RAM, GPU VRAM, "
+                        "CUDA availability, PyTorch version, active device, and memory usage.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="set_device",
+            description="Switch compute device between CPU and GPU. Options: 'auto' (best available), "
+                        "'cpu' (force CPU, use all RAM), 'cuda' (force GPU, use VRAM), 'cuda:0', 'cuda:1'. "
+                        "Automatically optimizes thread count, pin_memory, and DataLoader workers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "device": {"type": "string", "enum": ["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
+                               "description": "Device to use: auto, cpu, cuda, cuda:0, cuda:1"}
+                },
+                "required": ["device"]
+            }
+        ),
+        Tool(
+            name="estimate_batch_size",
+            description="Estimate the maximum training batch size that fits in available CPU RAM or GPU VRAM "
+                        "for a given backbone and image size.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "backbone": {"type": "string", "description": "CNN backbone (default: resnet18)"},
+                    "image_size": {"type": "integer", "description": "Input image size in pixels (default: 224)"},
+                    "num_classes": {"type": "integer", "description": "Number of classes (default: 10)"}
+                }
+            }
+        ),
+        Tool(
+            name="memory_summary",
+            description="Get current memory usage summary: CPU RAM, GPU VRAM allocated/free, process memory.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
         )
     ]
 
@@ -519,6 +564,52 @@ async def _handle_tool(name: str, args: Dict[str, Any]) -> Any:
     
     elif name == "full_pipeline":
         return await _run_full_pipeline(args)
+    
+    elif name == "get_system_info":
+        dm = get_device_manager(config.get('training.device', 'auto'))
+        return dm.get_system_info()
+    
+    elif name == "set_device":
+        new_device = args['device']
+        dm = get_device_manager(new_device)
+        config.set('training.device', new_device)
+        # Reset pipeline and registry to use new device
+        pipeline = None
+        registry = None
+        info = dm.get_system_info()
+        return {
+            'success': True,
+            'device': str(dm.device),
+            'is_gpu': dm.is_gpu,
+            'is_cpu': dm.is_cpu,
+            'system_info': info
+        }
+    
+    elif name == "estimate_batch_size":
+        from src.models.cnn_trainer import get_backbone
+        dm = get_device_manager(config.get('training.device', 'auto'))
+        backbone_name = args.get('backbone', config.get('training.backbone', 'resnet18'))
+        img_size = args.get('image_size', 224)
+        num_classes = args.get('num_classes', 10)
+        model = get_backbone(backbone_name, num_classes, pretrained=False)
+        model = model.to(dm.device)
+        max_batch = dm.estimate_max_batch_size(model, input_size=(3, img_size, img_size))
+        del model
+        dm.clear_memory()
+        return {
+            'device': str(dm.device),
+            'backbone': backbone_name,
+            'image_size': img_size,
+            'estimated_max_batch_size': max_batch,
+            'recommended_batch_size': min(max_batch, 64)
+        }
+    
+    elif name == "memory_summary":
+        dm = get_device_manager(config.get('training.device', 'auto'))
+        return {
+            'summary': dm.memory_summary(),
+            'device': str(dm.device)
+        }
     
     else:
         return {'error': f'Unknown tool: {name}'}

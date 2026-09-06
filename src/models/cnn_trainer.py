@@ -115,10 +115,14 @@ def train_attribute_model(
     Returns:
         Training results dict with metrics and model path
     """
-    # Determine device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    device = torch.device(device)
+    # Determine device with DeviceManager
+    from src.utils.device_manager import DeviceManager
+    dm = DeviceManager(device)
+    device = dm.device
+    
+    print(f"Device: {device} | GPU: {dm.is_gpu}")
+    if dm.is_gpu:
+        print(dm.memory_summary())
     
     # Get transforms
     tx = get_transforms(target_size, augment=True, aug_config=augmentation or {})
@@ -148,18 +152,22 @@ def train_attribute_model(
     # Override val transform
     val_dataset.dataset = datasets.ImageFolder(dataset_dir, transform=tx['val'])
     
+    # Use DeviceManager for optimal DataLoader settings
+    dl_kwargs = dm.get_dataloader_kwargs()
+    if num_workers is not None and num_workers >= 0:
+        dl_kwargs['num_workers'] = num_workers
+        dl_kwargs['persistent_workers'] = num_workers > 0
+    
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True
+        train_dataset, batch_size=batch_size, shuffle=True, **dl_kwargs
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True
+        val_dataset, batch_size=batch_size, shuffle=False, **dl_kwargs
     )
     
-    # Build model
+    # Build model with device optimization
     model = get_backbone(backbone, num_classes, pretrained)
-    model = model.to(device)
+    model = dm.optimize_for_device(model)
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()

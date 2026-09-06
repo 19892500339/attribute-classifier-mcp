@@ -480,11 +480,12 @@ class TestMCPServerRouting:
             'train_attribute_model', 'train_all_attributes',
             'detect_and_classify', 'classify_crop', 'batch_detect_and_classify',
             'register_model', 'unregister_model', 'list_models', 'get_model_info',
-            'update_config', 'get_config', 'set_class_attributes', 'full_pipeline'
+            'update_config', 'get_config', 'set_class_attributes', 'full_pipeline',
+            'get_system_info', 'set_device', 'estimate_batch_size', 'memory_summary'
         ]
         for name in expected:
             assert name in tool_names, f"Missing tool: {name}"
-        assert len(tools_list) == 16
+        assert len(tools_list) == 20
 
     def test_get_config_tool(self):
         from src.server import _handle_tool

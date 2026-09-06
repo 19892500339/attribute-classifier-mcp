@@ -88,7 +88,7 @@ def load_json_attributes(json_path: str) -> Dict[str, Any]:
         "imageWidth": 1920
     }
     """
-    with open(json_path, 'r', encoding='utf-8') as f:
+    with open(json_path, 'r', encoding='utf-8-sig') as f:
         return json.load(f)
 
 
@@ -100,35 +100,54 @@ def parse_xanylabeling_json(json_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     objects = []
     for shape in json_data.get('shapes', []):
+        if not isinstance(shape, dict):
+            continue
         label = shape.get('label', '')
+        if not isinstance(label, str):
+            label = str(label)
         points = shape.get('points', [])
         shape_type = shape.get('shape_type', 'rectangle')
         
+        # Validate points: must be a list of [x, y] pairs
+        if not isinstance(points, list):
+            continue
+        valid_points = []
+        for p in points:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    valid_points.append([float(p[0]), float(p[1])])
+                except (TypeError, ValueError):
+                    continue
+        points = valid_points
+        
         # Extract bbox from points
-        if shape_type == 'rectangle' and len(points) >= 2:
+        if not points:
+            continue
+        
+        try:
             x1 = min(p[0] for p in points)
             y1 = min(p[1] for p in points)
             x2 = max(p[0] for p in points)
             y2 = max(p[1] for p in points)
-        elif points:
-            x1 = min(p[0] for p in points)
-            y1 = min(p[1] for p in points)
-            x2 = max(p[0] for p in points)
-            y2 = max(p[1] for p in points)
-        else:
+        except (TypeError, ValueError):
             continue
         
         # Extract attributes from both 'flags' and 'attributes' fields
         attributes = {}
-        for flag_key, flag_val in shape.get('flags', {}).items():
+        flags = shape.get('flags', {})
+        if not isinstance(flags, dict):
+            flags = {}
+        for flag_key, flag_val in flags.items():
             if isinstance(flag_val, bool):
                 attributes[flag_key] = 'yes' if flag_val else 'no'
             else:
                 attributes[flag_key] = str(flag_val)
         
         # 'attributes' field overrides 'flags'
-        for attr_key, attr_val in shape.get('attributes', {}).items():
-            attributes[attr_key] = str(attr_val) if attr_val is not None else ''
+        shape_attrs = shape.get('attributes', {})
+        if isinstance(shape_attrs, dict):
+            for attr_key, attr_val in shape_attrs.items():
+                attributes[attr_key] = str(attr_val) if attr_val is not None else ''
         
         # Also check for description or group_id based attributes
         desc = shape.get('description', '')

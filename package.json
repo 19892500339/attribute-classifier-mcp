@@ -1,0 +1,28 @@
+{
+  "name": "attribute-classifier-mcp",
+  "version": "1.0.0",
+  "description": "MCP Server for YOLO detection + CNN attribute classification pipeline. Crops objects by bbox, trains CNN models per attribute (material, armrest, etc.), and runs multi-attribute inference.",
+  "main": "src/server.py",
+  "scripts": {
+    "start": "python src/server.py",
+    "train": "python src/train.py",
+    "inference": "python src/inference.py",
+    "crop": "python src/crop_objects.py",
+    "test": "python -m pytest tests/",
+    "install-deps": "pip install -r requirements.txt"
+  },
+  "keywords": [
+    "mcp",
+    "yolo",
+    "cnn",
+    "attribute-classification",
+    "object-detection",
+    "image-classification"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}

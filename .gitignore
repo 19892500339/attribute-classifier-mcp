@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data (large files - don't commit)
+data/images/
+data/labels/
+data/jsons/
+data/cropped/
+data/datasets/
+
+# Models (large binary files - don't commit)
+models/*.pth
+models/*.pt
+models/*.onnx
+
+# Keep directory structure
+!data/.gitkeep
+!models/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+runs/

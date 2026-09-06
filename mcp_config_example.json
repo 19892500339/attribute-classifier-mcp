@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "attribute-classifier": {
+      "command": "python",
+      "args": [
+        "src/server.py"
+      ],
+      "cwd": "/path/to/attribute-classifier-mcp",
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+}

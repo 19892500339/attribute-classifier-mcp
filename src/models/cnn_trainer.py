@@ -1,0 +1,371 @@
+"""CNN model training for attribute classification."""
+import os
+import json
+import time
+import copy
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms, models
+from tqdm import tqdm
+
+
+def get_backbone(name: str, num_classes: int, pretrained: bool = True) -> nn.Module:
+    """
+    Get a CNN backbone model.
+    
+    Supported: resnet18, resnet34, resnet50, mobilenet_v2, efficientnet_b0
+    """
+    weights = 'IMAGENET1K_V1' if pretrained else None
+    
+    if name == 'resnet18':
+        model = models.resnet18(weights=weights)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif name == 'resnet34':
+        model = models.resnet34(weights=weights)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif name == 'resnet50':
+        model = models.resnet50(weights=weights)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif name == 'mobilenet_v2':
+        model = models.mobilenet_v2(weights=weights)
+        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    elif name == 'efficientnet_b0':
+        model = models.efficientnet_b0(weights=weights)
+        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    else:
+        raise ValueError(f"Unsupported backbone: {name}. Choose from: resnet18, resnet34, resnet50, mobilenet_v2, efficientnet_b0")
+    
+    return model
+
+
+def get_transforms(target_size: Tuple[int, int] = (224, 224), augment: bool = True, aug_config: Dict = None) -> Dict:
+    """Get train and val transforms."""
+    aug_config = aug_config or {}
+    
+    train_transforms_list = []
+    if augment:
+        if aug_config.get('horizontal_flip', True):
+            train_transforms_list.append(transforms.RandomHorizontalFlip())
+        if aug_config.get('vertical_flip', False):
+            train_transforms_list.append(transforms.RandomVerticalFlip())
+        rotation = aug_config.get('rotation', 15)
+        if rotation > 0:
+            train_transforms_list.append(transforms.RandomRotation(rotation))
+        if aug_config.get('color_jitter', True):
+            train_transforms_list.append(transforms.ColorJitter(
+                brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1
+            ))
+    
+    train_transform = transforms.Compose([
+        transforms.Resize(target_size),
+        *train_transforms_list,
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    val_transform = transforms.Compose([
+        transforms.Resize(target_size),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    return {'train': train_transform, 'val': val_transform}
+
+
+def train_attribute_model(
+    dataset_dir: str,
+    attribute_name: str,
+    output_dir: str = "./models",
+    backbone: str = "resnet18",
+    epochs: int = 50,
+    batch_size: int = 32,
+    learning_rate: float = 0.001,
+    val_split: float = 0.2,
+    pretrained: bool = True,
+    device: str = "auto",
+    num_workers: int = 4,
+    early_stopping: int = 10,
+    target_size: Tuple[int, int] = (224, 224),
+    augmentation: Dict = None
+) -> Dict[str, Any]:
+    """
+    Train a CNN classifier for a specific attribute.
+    
+    Args:
+        dataset_dir: Directory organized as dataset_dir/{attribute_value}/images...
+        attribute_name: Name of the attribute being classified
+        output_dir: Where to save the trained model
+        backbone: CNN backbone name
+        epochs: Number of training epochs
+        batch_size: Training batch size
+        learning_rate: Initial learning rate
+        val_split: Fraction of data for validation
+        pretrained: Use ImageNet pretrained weights
+        device: Compute device
+        num_workers: DataLoader workers
+        early_stopping: Stop after N epochs without improvement (0=disable)
+        target_size: Input image size
+        augmentation: Augmentation config dict
+    
+    Returns:
+        Training results dict with metrics and model path
+    """
+    # Determine device
+    if device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(device)
+    
+    # Get transforms
+    tx = get_transforms(target_size, augment=True, aug_config=augmentation or {})
+    
+    # Load dataset
+    full_dataset = datasets.ImageFolder(dataset_dir, transform=tx['train'])
+    class_names = full_dataset.classes
+    num_classes = len(class_names)
+    
+    if num_classes < 2:
+        return {
+            'success': False,
+            'error': f"Need at least 2 classes, found {num_classes}: {class_names}",
+            'attribute': attribute_name
+        }
+    
+    # Split into train/val
+    total = len(full_dataset)
+    val_size = int(total * val_split)
+    train_size = total - val_size
+    
+    train_dataset, val_dataset = random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    # Override val transform
+    val_dataset.dataset = datasets.ImageFolder(dataset_dir, transform=tx['val'])
+    
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True
+    )
+    
+    # Build model
+    model = get_backbone(backbone, num_classes, pretrained)
+    model = model.to(device)
+    
+    # Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5
+    )
+    
+    # Training loop
+    best_val_acc = 0.0
+    best_model_state = None
+    epochs_no_improve = 0
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    
+    start_time = time.time()
+    
+    for epoch in range(epochs):
+        # Train phase
+        model.train()
+        running_loss = 0.0
+        running_correct = 0
+        running_total = 0
+        
+        for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
+            inputs, labels = inputs.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item() * inputs.size(0)
+            _, predicted = torch.max(outputs, 1)
+            running_correct += (predicted == labels).sum().item()
+            running_total += labels.size(0)
+        
+        train_loss = running_loss / running_total
+        train_acc = running_correct / running_total
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item() * inputs.size(0)
+                _, predicted = torch.max(outputs, 1)
+                val_correct += (predicted == labels).sum().item()
+                val_total += labels.size(0)
+        
+        val_loss = val_loss / max(val_total, 1)
+        val_acc = val_correct / max(val_total, 1)
+        
+        scheduler.step(val_loss)
+        
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        
+        print(f"Epoch {epoch+1}/{epochs} - "
+              f"train_loss: {train_loss:.4f}, train_acc: {train_acc:.4f}, "
+              f"val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}")
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_state = copy.deepcopy(model.state_dict())
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+        
+        # Early stopping
+        if early_stopping > 0 and epochs_no_improve >= early_stopping:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+    
+    training_time = time.time() - start_time
+    
+    # Save best model
+    os.makedirs(output_dir, exist_ok=True)
+    model_filename = f"{attribute_name}_{backbone}_best.pth"
+    model_path = os.path.join(output_dir, model_filename)
+    
+    save_data = {
+        'model_state_dict': best_model_state or model.state_dict(),
+        'class_names': class_names,
+        'num_classes': num_classes,
+        'backbone': backbone,
+        'attribute_name': attribute_name,
+        'target_size': target_size,
+        'best_val_acc': best_val_acc,
+        'training_config': {
+            'epochs': epochs,
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'pretrained': pretrained
+        }
+    }
+    torch.save(save_data, model_path)
+    
+    # Also save a metadata JSON
+    meta_path = os.path.join(output_dir, f"{attribute_name}_{backbone}_meta.json")
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'attribute_name': attribute_name,
+            'backbone': backbone,
+            'class_names': class_names,
+            'num_classes': num_classes,
+            'target_size': list(target_size),
+            'best_val_acc': best_val_acc,
+            'total_epochs': len(history['train_loss']),
+            'training_time_seconds': training_time,
+            'train_samples': train_size,
+            'val_samples': val_size,
+            'model_file': model_filename
+        }, f, ensure_ascii=False, indent=2)
+    
+    return {
+        'success': True,
+        'attribute': attribute_name,
+        'model_path': model_path,
+        'meta_path': meta_path,
+        'class_names': class_names,
+        'num_classes': num_classes,
+        'best_val_acc': best_val_acc,
+        'total_epochs': len(history['train_loss']),
+        'training_time': training_time,
+        'train_samples': train_size,
+        'val_samples': val_size,
+        'history': history,
+        'device': str(device)
+    }
+
+
+def train_all_attributes(
+    datasets_base_dir: str,
+    output_dir: str = "./models",
+    attributes: Optional[List[str]] = None,
+    **train_kwargs
+) -> Dict[str, Any]:
+    """
+    Train CNN classifiers for all attribute datasets found in the base directory.
+    
+    Each subdirectory under datasets_base_dir is treated as an attribute dataset:
+    datasets_base_dir/
+        material/
+            leather/
+            wood/
+        has_armrest/
+            yes/
+            no/
+    
+    Args:
+        datasets_base_dir: Base directory containing attribute subdirectories
+        output_dir: Where to save trained models
+        attributes: Specific attributes to train (None = all found)
+        **train_kwargs: Passed to train_attribute_model
+    
+    Returns:
+        Dict with results per attribute
+    """
+    results = {}
+    
+    # Find attribute datasets
+    if attributes:
+        attr_dirs = attributes
+    else:
+        attr_dirs = [
+            d for d in os.listdir(datasets_base_dir)
+            if os.path.isdir(os.path.join(datasets_base_dir, d))
+        ]
+    
+    for attr_name in attr_dirs:
+        dataset_dir = os.path.join(datasets_base_dir, attr_name)
+        if not os.path.isdir(dataset_dir):
+            results[attr_name] = {'success': False, 'error': f'Directory not found: {dataset_dir}'}
+            continue
+        
+        # Check if it has subdirectories (class folders)
+        subdirs = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
+        if len(subdirs) < 2:
+            results[attr_name] = {
+                'success': False,
+                'error': f'Need at least 2 value folders, found {len(subdirs)}: {subdirs}'
+            }
+            continue
+        
+        print(chr(10) + "=" * 60)
+        print("Training model for attribute: " + attr_name)
+        print("Classes: " + str(subdirs))
+        print("=" * 60)
+        
+        result = train_attribute_model(
+            dataset_dir=dataset_dir,
+            attribute_name=attr_name,
+            output_dir=output_dir,
+            **train_kwargs
+        )
+        results[attr_name] = result
+    
+    return results

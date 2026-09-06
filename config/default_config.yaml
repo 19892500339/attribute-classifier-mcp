@@ -1,0 +1,84 @@
+# Attribute Classifier MCP Server Configuration
+# ==============================================
+
+# Paths Configuration
+paths:
+  # Directory containing original images
+  images_dir: "./data/images"
+  # Directory containing YOLO txt annotation files (one per image)
+  labels_dir: "./data/labels"
+  # Directory containing per-image JSON attribute files (X-AnyLabeling format)
+  json_dir: "./data/jsons"
+  # Master JSON file with all attributes
+  master_json: "./data/attributes.json"
+  # Category txt file (YOLO class names)
+  classes_file: "./data/classes.txt"
+  # Output directory for cropped objects
+  cropped_dir: "./data/cropped"
+  # Output directory for organized datasets (per attribute)
+  datasets_dir: "./data/datasets"
+  # Directory to save trained models
+  models_dir: "./models"
+
+# Cropping Configuration
+crop:
+  # Padding around bbox (pixels)
+  padding: 5
+  # Minimum crop size (pixels)
+  min_size: 32
+  # Output image size for CNN training
+  target_size: [224, 224]
+
+# Training Configuration
+training:
+  # CNN backbone: resnet18, resnet34, resnet50, mobilenet_v2, efficientnet_b0
+  backbone: "resnet18"
+  # Training epochs
+  epochs: 50
+  # Batch size
+  batch_size: 32
+  # Learning rate
+  learning_rate: 0.001
+  # Train/val split ratio
+  val_split: 0.2
+  # Use pretrained weights
+  pretrained: true
+  # Device: auto, cpu, cuda, cuda:0
+  device: "auto"
+  # Number of data loading workers
+  num_workers: 4
+  # Early stopping patience (0 to disable)
+  early_stopping: 10
+  # Data augmentation
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: false
+    rotation: 15
+    color_jitter: true
+
+# Attribute Models Configuration
+# Each attribute maps to a model file. Models are auto-trained or can be manually specified.
+# Format: attribute_name -> model_path (relative to models_dir)
+attribute_models: {}
+  # Example:
+  # material: "material_resnet18_best.pth"
+  # has_armrest: "has_armrest_resnet18_best.pth"
+  # seat_count: "seat_count_resnet18_best.pth"
+
+# YOLO Configuration (for detection stage in inference pipeline)
+yolo:
+  # YOLO model path
+  model: "yolov8n.pt"
+  # Confidence threshold
+  confidence: 0.5
+  # IOU threshold for NMS
+  iou: 0.45
+  # Target classes to detect (empty = all)
+  target_classes: []
+
+# Server Configuration
+server:
+  name: "attribute-classifier-mcp"
+  version: "1.0.0"
+  host: "localhost"
+  port: 8765

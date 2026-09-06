@@ -7,8 +7,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 def load_classes(classes_file: str) -> List[str]:
     """Load class names from classes.txt (one name per line)."""
-    with open(classes_file, 'r', encoding='utf-8') as f:
-        return [line.strip() for line in f if line.strip()]
+    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'latin-1']:
+        try:
+            with open(classes_file, 'r', encoding=enc) as f:
+                return [line.strip() for line in f if line.strip()]
+        except UnicodeDecodeError:
+            continue
+    # Final fallback: read as binary
+    with open(classes_file, 'rb') as f:
+        return [line.decode('utf-8', errors='replace').strip() for line in f if line.strip()]
 
 
 def load_yolo_annotations(txt_path: str) -> List[Dict[str, Any]]:
